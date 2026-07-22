@@ -54,11 +54,16 @@ public without sharing class SlackApiService {
         callSlack('pins.add', body);
     }
 
-    public static void openApproverSelectModal(String triggerId, String opportunityId) {
+    public static void openApproverSelectModal(String triggerId, String opportunityId, String sourceChannelId, String sourceMessageTs) {
+        Map<String, Object> metadata = new Map<String, Object>{
+            'opportunityId' => opportunityId,
+            'sourceChannelId' => sourceChannelId,
+            'sourceMessageTs' => sourceMessageTs
+        };
         Map<String, Object> view = new Map<String, Object>{
             'type' => 'modal',
             'callback_id' => 'approver_select_modal',
-            'private_metadata' => opportunityId,
+            'private_metadata' => JSON.serialize(metadata),
             'title' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Select Approver' },
             'submit' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Send' },
             'close' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Cancel' },
@@ -79,6 +84,34 @@ public without sharing class SlackApiService {
             'view' => view
         };
         callSlack('views.open', body);
+    }
+
+    public static List<Object> buildStatusBlocks(String title, String statusText) {
+        return new List<Object>{
+            new Map<String, Object>{
+                'type' => 'section',
+                'text' => new Map<String, Object>{
+                    'type' => 'mrkdwn',
+                    'text' => '*' + title + '*\n' + statusText
+                }
+            }
+        };
+    }
+
+    public static void updateMessage(String channelId, String ts, String text) {
+        updateMessage(channelId, ts, text, null);
+    }
+
+    public static void updateMessage(String channelId, String ts, String text, List<Object> blocks) {
+        Map<String, Object> body = new Map<String, Object>{
+            'channel' => channelId,
+            'ts' => ts,
+            'text' => text
+        };
+        if (blocks != null) {
+            body.put('blocks', blocks);
+        }
+        callSlack('chat.update', body);
     }
 
     public static void openOpportunityViewModal(String triggerId, String opportunityId) {
@@ -156,9 +189,39 @@ public without sharing class SlackApiService {
         callSlack('chat.postMessage', body);
     }
 
+    public static void postDirectMessage(String slackUserId, String text) {
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint('https://slack.com/api/conversations.open');
+        req.setMethod('POST');
+        req.setHeader('Authorization', 'Bearer ' + getBotToken());
+        req.setHeader('Content-Type', 'application/json; charset=utf-8');
+        req.setBody(JSON.serialize(new Map<String, Object>{ 'users' => slackUserId }));
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        Map<String, Object> result = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+        Map<String, Object> channel = (Map<String, Object>) result.get('channel');
+        String dmChannelId = (String) channel.get('id');
+        if (String.isBlank(dmChannelId)) {
+            return;
+        }
+
+        postToChannel(dmChannelId, text);
+    }
+
     // Added oppName, oppAmount, oppDiscount so the DM shows key Opportunity details
     // above the Approve/Reject buttons.
     public static void postDM(String slackUserId, String text, String opportunityId, String workitemId,
+                               String oppName, Decimal oppAmount, Decimal oppDiscount) {
+        postDM(slackUserId, text, opportunityId, workitemId, null, null, oppName, oppAmount, oppDiscount);
+    }
+
+    // Backward-compatible overload used by older async callers.
+    public static void postDM(String slackUserId, String text, String opportunityId) {
+        postDM(slackUserId, text, opportunityId, null, null, null, null);
+    }
+
+    public static void postDM(String slackUserId, String text, String opportunityId, String workitemId,
+                               String originChannelId, String originMessageTs,
                                String oppName, Decimal oppAmount, Decimal oppDiscount) {
         HttpRequest req = new HttpRequest();
         req.setEndpoint('https://slack.com/api/conversations.open');
@@ -172,21 +235,26 @@ public without sharing class SlackApiService {
         Map<String, Object> channel = (Map<String, Object>) result.get('channel');
         String dmChannelId = (String) channel.get('id');
 
-        String combinedValue = opportunityId + '|' + workitemId;
+        Map<String, Object> actionValue = new Map<String, Object>{
+            'opportunityId' => opportunityId,
+            'workitemId' => workitemId,
+            'originChannelId' => originChannelId,
+            'originMessageTs' => originMessageTs
+        };
 
         Map<String, Object> approveBtn = new Map<String, Object>{
             'type' => 'button',
             'text' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Approve' },
             'style' => 'primary',
             'action_id' => 'approve_record',
-            'value' => combinedValue
+            'value' => JSON.serialize(actionValue)
         };
         Map<String, Object> rejectBtn = new Map<String, Object>{
             'type' => 'button',
             'text' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Reject' },
             'style' => 'danger',
             'action_id' => 'reject_record',
-            'value' => combinedValue
+            'value' => JSON.serialize(actionValue)
         };
         Map<String, Object> viewBtn = new Map<String, Object>{
             'type' => 'button',
@@ -218,10 +286,5 @@ public without sharing class SlackApiService {
             }
         };
         callSlack('chat.postMessage', body);
-    }
-
-    // Backward-compatible overload used by older async callers.
-    public static void postDM(String slackUserId, String text, String opportunityId) {
-        postDM(slackUserId, text, opportunityId, null, null, null, null);
     }
 }
