@@ -35,6 +35,10 @@ global without sharing class SlackApprovalHandler {
             String triggerId = (String) payload.get('trigger_id');
             SlackApiService.openApproverSelectModal(triggerId, value);
 
+        } else if (actionId == 'view_record') {
+            String triggerId = (String) payload.get('trigger_id');
+            SlackApiService.openOpportunityViewModal(triggerId, value);
+
         } else if (actionId == 'approve_record' || actionId == 'reject_record') {
             // value is encoded as "opportunityId|workitemId"
             List<String> parts = value.split('\\|');

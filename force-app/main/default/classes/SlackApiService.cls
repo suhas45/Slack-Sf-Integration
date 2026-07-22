@@ -81,6 +81,60 @@ public without sharing class SlackApiService {
         callSlack('views.open', body);
     }
 
+    public static void openOpportunityViewModal(String triggerId, String opportunityId) {
+        List<Opportunity> opps = [
+            SELECT Name, Amount, CloseDate, Probability, StageName, SDO_Sales_Discount__c, ForecastCategoryName
+            FROM Opportunity
+            WHERE Id = :opportunityId
+            LIMIT 1
+        ];
+        if (opps.isEmpty()) {
+            return;
+        }
+
+        Opportunity opp = opps[0];
+        String amountStr = opp.Amount != null ? opp.Amount.setScale(2).format() : 'N/A';
+        String closeDateStr = opp.CloseDate != null ? String.valueOf(opp.CloseDate) : 'N/A';
+        String probabilityStr = opp.Probability != null ? String.valueOf(opp.Probability.intValue()) + '%' : 'N/A';
+        String stageNameStr = opp.StageName != null ? String.valueOf(opp.StageName) : 'N/A';
+        String discountStr = opp.SDO_Sales_Discount__c != null ? String.valueOf(opp.SDO_Sales_Discount__c) : 'N/A';
+        String forecastCategoryStr = opp.ForecastCategoryName != null ? String.valueOf(opp.ForecastCategoryName) : 'N/A';
+        String recordUrl = URL.getOrgDomainUrl().toExternalForm() + '/lightning/r/Opportunity/' + opportunityId + '/view';
+
+        Map<String, Object> view = new Map<String, Object>{
+            'type' => 'modal',
+            'callback_id' => 'opportunity_view_modal',
+            'title' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Opportunity Details' },
+            'close' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Close' },
+            'blocks' => new List<Object>{
+                new Map<String, Object>{
+                    'type' => 'section',
+                    'fields' => new List<Object>{
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Name:*\n' + (opp.Name != null ? opp.Name : 'N/A') },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Amount:*\n' + amountStr },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Close Date:*\n' + closeDateStr },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Probability:*\n' + probabilityStr },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Stage Name:*\n' + stageNameStr },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*SDO Sales Discount:*\n' + discountStr },
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Forecast Category:*\n' + forecastCategoryStr }
+                    }
+                },
+                new Map<String, Object>{
+                    'type' => 'context',
+                    'elements' => new List<Object>{
+                        new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '<' + recordUrl + '|navigate to SF>' }
+                    }
+                }
+            }
+        };
+
+        Map<String, Object> body = new Map<String, Object>{
+            'trigger_id' => triggerId,
+            'view' => view
+        };
+        callSlack('views.open', body);
+    }
+
     public static String getUserEmail(String slackUserId) {
         HttpRequest req = new HttpRequest();
         req.setEndpoint('https://slack.com/api/users.info?user=' + slackUserId);
@@ -134,6 +188,12 @@ public without sharing class SlackApiService {
             'action_id' => 'reject_record',
             'value' => combinedValue
         };
+        Map<String, Object> viewBtn = new Map<String, Object>{
+            'type' => 'button',
+            'text' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'View' },
+            'action_id' => 'view_record',
+            'value' => opportunityId
+        };
 
         String amountStr = oppAmount != null ? oppAmount.setScale(2).format() : 'N/A';
         String discountStr = oppDiscount != null ? String.valueOf(oppDiscount) : 'N/A';
@@ -154,9 +214,14 @@ public without sharing class SlackApiService {
             'blocks' => new List<Object>{
                 new Map<String, Object>{ 'type' => 'section', 'text' => new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => text } },
                 detailsBlock,
-                new Map<String, Object>{ 'type' => 'actions', 'elements' => new List<Object>{ approveBtn, rejectBtn } }
+                new Map<String, Object>{ 'type' => 'actions', 'elements' => new List<Object>{ approveBtn, rejectBtn, viewBtn } }
             }
         };
         callSlack('chat.postMessage', body);
+    }
+
+    // Backward-compatible overload used by older async callers.
+    public static void postDM(String slackUserId, String text, String opportunityId) {
+        postDM(slackUserId, text, opportunityId, null, null, null, null);
     }
 }
