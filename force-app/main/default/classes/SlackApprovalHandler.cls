@@ -32,13 +32,11 @@ global without sharing class SlackApprovalHandler {
         Map<String, Object> user = (Map<String, Object>) payload.get('user');
         String clickingSlackUserId = (user != null && user.get('id') != null) ? (String) user.get('id') : null;
         Map<String, Object> channel = (Map<String, Object>) payload.get('channel');
-        String messageChannelId = channel != null ? (String) channel.get('id') : null;
-        Map<String, Object> message = (Map<String, Object>) payload.get('message');
-        String messageTs = message != null ? (String) message.get('ts') : null;
+        String originChannelId = channel != null ? (String) channel.get('id') : null;
 
         if (actionId == 'submit_approval') {
             String triggerId = (String) payload.get('trigger_id');
-            SlackApiService.openApproverSelectModal(triggerId, value, messageChannelId, messageTs);
+            SlackApiService.openApproverSelectModal(triggerId, value);
             return;
         }
 
@@ -49,27 +47,47 @@ global without sharing class SlackApprovalHandler {
         }
 
         if (actionId == 'approve_record' || actionId == 'reject_record') {
-            Map<String, Object> actionValue = parseJsonMap(value);
-            String opportunityId = (String) actionValue.get('opportunityId');
-            String workitemId = (String) actionValue.get('workitemId');
-            String originChannelId = (String) actionValue.get('originChannelId');
-            if (String.isBlank(opportunityId) || String.isBlank(workitemId)) {
+            List<String> parts = value.split('\\|');
+            if (parts.size() != 2) {
                 return;
             }
 
+            String opportunityId = parts[0];
+            String workitemId = parts[1];
             Boolean approve = (actionId == 'approve_record');
-            processApproval(opportunityId, workitemId, approve, clickingSlackUserId, originChannelId);
+            String triggerId = (String) payload.get('trigger_id');
+
+            // Open a modal for optional comments before final approval/rejection.
+            SlackApiService.openDecisionCommentModal(
+                triggerId,
+                opportunityId,
+                workitemId,
+                originChannelId,
+                approve
+            );
         }
     }
 
     private static void handleViewSubmission(Map<String, Object> payload) {
         Map<String, Object> view = (Map<String, Object>) payload.get('view');
-        Map<String, Object> metadata = parseJsonMap((String) view.get('private_metadata'));
-        String opportunityId = (String) metadata.get('opportunityId');
-        String sourceChannelId = (String) metadata.get('sourceChannelId');
-        String sourceMessageTs = (String) metadata.get('sourceMessageTs');
+        String callbackId = (String) view.get('callback_id');
 
-        Map<String, Object> stateValues = (Map<String, Object>) ((Map<String, Object>) view.get('state')).get('values');
+        if (callbackId == 'approver_select_modal') {
+            handleApproverSubmission(view);
+            return;
+        }
+
+        if (callbackId == 'decision_comment_modal') {
+            handleDecisionSubmission(view);
+            return;
+        }
+    }
+
+    private static void handleApproverSubmission(Map<String, Object> view) {
+        String opportunityId = (String) view.get('private_metadata');
+
+        Map<String, Object> stateValues = (Map<String, Object>)
+            ((Map<String, Object>) view.get('state')).get('values');
         Map<String, Object> approverBlock = (Map<String, Object>) stateValues.get('approver_block');
         Map<String, Object> approverUser = (Map<String, Object>) approverBlock.get('approver_user');
         String slackUserId = (String) approverUser.get('selected_user');
@@ -100,12 +118,37 @@ global without sharing class SlackApprovalHandler {
             workitemId = newWorkitemIds[0];
         }
 
-        notifyAfterSubmit(opportunityId, slackUserId, workitemId, sourceChannelId, sourceMessageTs);
+        notifyAfterSubmit(opportunityId, slackUserId, workitemId);
+    }
+
+    private static void handleDecisionSubmission(Map<String, Object> view) {
+        Map<String, Object> metadata = parseJsonMap((String) view.get('private_metadata'));
+        String opportunityId = (String) metadata.get('opportunityId');
+        String workitemId = (String) metadata.get('workitemId');
+        String originChannelId = (String) metadata.get('originChannelId');
+        Boolean approve = ((String) metadata.get('decision')) == 'Approve';
+
+        String decisionComment;
+        Map<String, Object> state = (Map<String, Object>) view.get('state');
+        if (state != null) {
+            Map<String, Object> stateValues = (Map<String, Object>) ((Map<String, Object>) state).get('values');
+            if (stateValues != null && stateValues.containsKey('decision_comment_block')) {
+                Map<String, Object> commentBlock = (Map<String, Object>) stateValues.get('decision_comment_block');
+                Map<String, Object> commentInput = (Map<String, Object>) commentBlock.get('decision_comment');
+                if (commentInput != null) {
+                    decisionComment = (String) commentInput.get('value');
+                }
+            }
+        }
+
+        Map<String, Object> user = (Map<String, Object>) view.get('user');
+        String clickingSlackUserId = user != null ? (String) user.get('id') : null;
+
+        processApproval(opportunityId, workitemId, approve, clickingSlackUserId, decisionComment, originChannelId);
     }
 
     @future(callout=true)
-    private static void notifyAfterSubmit(String opportunityId, String slackUserId, String workitemId,
-                                          String sourceChannelId, String sourceMessageTs) {
+    private static void notifyAfterSubmit(String opportunityId, String slackUserId, String workitemId) {
         if (workitemId == null) {
             return;
         }
@@ -125,17 +168,11 @@ global without sharing class SlackApprovalHandler {
             oppDiscount = opps[0].SDO_Sales_Discount__c;
         }
 
-        if (!String.isBlank(sourceChannelId) && !String.isBlank(sourceMessageTs)) {
-            SlackApiService.postToChannel(sourceChannelId, 'Record sent to approval.');
-        }
-
         SlackApiService.postDM(
             slackUserId,
             'You have been asked to approve this Opportunity.',
             opportunityId,
             workitemId,
-            sourceChannelId,
-            sourceMessageTs,
             oppName,
             oppAmount,
             oppDiscount
@@ -148,19 +185,19 @@ global without sharing class SlackApprovalHandler {
     }
 
     private static void processApproval(String opportunityId, String workitemId, Boolean approve,
-                                        String clickingSlackUserId, String originChannelId) {
+                                        String clickingSlackUserId, String decisionComment, String originChannelId) {
         try {
             Approval.ProcessWorkitemRequest workReq = new Approval.ProcessWorkitemRequest();
             workReq.setWorkitemId(workitemId);
             workReq.setAction(approve ? 'Approve' : 'Reject');
-            workReq.setComments('Handled via Slack');
+            workReq.setComments(String.isBlank(decisionComment) ? 'Handled via Slack' : decisionComment);
             Approval.process(workReq);
         } catch (Exception ex) {
             notifyFailure(clickingSlackUserId, opportunityId, ex.getMessage());
             return;
         }
 
-        notifyAfterDecision(approve, clickingSlackUserId, originChannelId);
+        notifyAfterDecision(opportunityId, approve, clickingSlackUserId, originChannelId);
     }
 
     @future(callout=true)
@@ -168,8 +205,9 @@ global without sharing class SlackApprovalHandler {
         if (clickingSlackUserId == null) {
             return;
         }
+
         try {
-            SlackApiService.postDirectMessage(
+            SlackApiService.postToChannel(
                 clickingSlackUserId,
                 'Failed to process approval for ' + opportunityId + ': ' + errorMessage
             );
@@ -179,22 +217,30 @@ global without sharing class SlackApprovalHandler {
     }
 
     @future(callout=true)
-    private static void notifyAfterDecision(Boolean approve, String clickingSlackUserId, String originChannelId) {
-        String statusText = approve ? 'Record approved.' : 'Record rejected.';
+    private static void notifyAfterDecision(String opportunityId, Boolean approve,
+                                            String clickingSlackUserId, String originChannelId) {
+        String status = approve ? 'Approved ✅' : 'Rejected ❌';
+        String statusText = 'You have ' + status + ' the Opportunity approval.';
 
         if (!String.isBlank(originChannelId)) {
             try {
-                SlackApiService.postToChannel(originChannelId, statusText);
+                SlackApiService.postToChannel(
+                    originChannelId,
+                    statusText
+                );
             } catch (Exception e) {
-                System.debug('notifyAfterDecision: failed to post channel status: ' + e);
+                System.debug('notifyAfterDecision: failed to notify origin channel: ' + e);
             }
         }
 
         if (!String.isBlank(clickingSlackUserId)) {
             try {
-                SlackApiService.postDirectMessage(clickingSlackUserId, statusText);
+                SlackApiService.postDirectMessage(
+                    clickingSlackUserId,
+                    statusText
+                );
             } catch (Exception e) {
-                System.debug('notifyAfterDecision: failed to post dm status: ' + e);
+                System.debug('notifyAfterDecision: failed to notify clicker: ' + e);
             }
         }
     }

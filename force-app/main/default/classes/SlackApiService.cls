@@ -54,16 +54,11 @@ public without sharing class SlackApiService {
         callSlack('pins.add', body);
     }
 
-    public static void openApproverSelectModal(String triggerId, String opportunityId, String sourceChannelId, String sourceMessageTs) {
-        Map<String, Object> metadata = new Map<String, Object>{
-            'opportunityId' => opportunityId,
-            'sourceChannelId' => sourceChannelId,
-            'sourceMessageTs' => sourceMessageTs
-        };
+    public static void openApproverSelectModal(String triggerId, String opportunityId) {
         Map<String, Object> view = new Map<String, Object>{
             'type' => 'modal',
             'callback_id' => 'approver_select_modal',
-            'private_metadata' => JSON.serialize(metadata),
+            'private_metadata' => opportunityId,
             'title' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Select Approver' },
             'submit' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Send' },
             'close' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Cancel' },
@@ -86,32 +81,59 @@ public without sharing class SlackApiService {
         callSlack('views.open', body);
     }
 
-    public static List<Object> buildStatusBlocks(String title, String statusText) {
-        return new List<Object>{
-            new Map<String, Object>{
-                'type' => 'section',
-                'text' => new Map<String, Object>{
-                    'type' => 'mrkdwn',
-                    'text' => '*' + title + '*\n' + statusText
+    public static void openDecisionCommentModal(String triggerId, String opportunityId, String workitemId,
+                                                String originChannelId, Boolean approve) {
+        Map<String, Object> metadata = new Map<String, Object>{
+            'opportunityId' => opportunityId,
+            'workitemId' => workitemId,
+            'originChannelId' => originChannelId,
+            'decision' => approve ? 'Approve' : 'Reject'
+        };
+
+        String titleText = approve ? 'Approve Opportunity' : 'Reject Opportunity';
+        String submitText = approve ? 'Approve' : 'Reject';
+        String helperText = approve
+            ? 'Add an optional comment, then approve the record.'
+            : 'Add an optional comment, then reject the record.';
+
+        Map<String, Object> view = new Map<String, Object>{
+            'type' => 'modal',
+            'callback_id' => 'decision_comment_modal',
+            'private_metadata' => JSON.serialize(metadata),
+            'title' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => titleText },
+            'submit' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => submitText },
+            'close' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Cancel' },
+            'blocks' => new List<Object>{
+                new Map<String, Object>{
+                    'type' => 'section',
+                    'text' => new Map<String, Object>{
+                        'type' => 'mrkdwn',
+                        'text' => helperText
+                    }
+                },
+                new Map<String, Object>{
+                    'type' => 'input',
+                    'block_id' => 'decision_comment_block',
+                    'optional' => true,
+                    'element' => new Map<String, Object>{
+                        'type' => 'plain_text_input',
+                        'action_id' => 'decision_comment',
+                        'multiline' => true,
+                        'placeholder' => new Map<String, Object>{
+                            'type' => 'plain_text',
+                            'text' => 'Leave a comment (optional)'
+                        }
+                    },
+                    'label' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Comments' }
                 }
             }
         };
-    }
 
-    public static void updateMessage(String channelId, String ts, String text) {
-        updateMessage(channelId, ts, text, null);
-    }
-
-    public static void updateMessage(String channelId, String ts, String text, List<Object> blocks) {
         Map<String, Object> body = new Map<String, Object>{
-            'channel' => channelId,
-            'ts' => ts,
-            'text' => text
+            'trigger_id' => triggerId,
+            'view' => view
         };
-        if (blocks != null) {
-            body.put('blocks', blocks);
-        }
-        callSlack('chat.update', body);
+        callSlack('views.open', body);
     }
 
     public static void openOpportunityViewModal(String triggerId, String opportunityId) {
@@ -200,7 +222,7 @@ public without sharing class SlackApiService {
         HttpResponse res = http.send(req);
         Map<String, Object> result = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
         Map<String, Object> channel = (Map<String, Object>) result.get('channel');
-        String dmChannelId = (String) channel.get('id');
+        String dmChannelId = channel != null ? (String) channel.get('id') : null;
         if (String.isBlank(dmChannelId)) {
             return;
         }
@@ -211,17 +233,6 @@ public without sharing class SlackApiService {
     // Added oppName, oppAmount, oppDiscount so the DM shows key Opportunity details
     // above the Approve/Reject buttons.
     public static void postDM(String slackUserId, String text, String opportunityId, String workitemId,
-                               String oppName, Decimal oppAmount, Decimal oppDiscount) {
-        postDM(slackUserId, text, opportunityId, workitemId, null, null, oppName, oppAmount, oppDiscount);
-    }
-
-    // Backward-compatible overload used by older async callers.
-    public static void postDM(String slackUserId, String text, String opportunityId) {
-        postDM(slackUserId, text, opportunityId, null, null, null, null);
-    }
-
-    public static void postDM(String slackUserId, String text, String opportunityId, String workitemId,
-                               String originChannelId, String originMessageTs,
                                String oppName, Decimal oppAmount, Decimal oppDiscount) {
         HttpRequest req = new HttpRequest();
         req.setEndpoint('https://slack.com/api/conversations.open');
@@ -235,26 +246,21 @@ public without sharing class SlackApiService {
         Map<String, Object> channel = (Map<String, Object>) result.get('channel');
         String dmChannelId = (String) channel.get('id');
 
-        Map<String, Object> actionValue = new Map<String, Object>{
-            'opportunityId' => opportunityId,
-            'workitemId' => workitemId,
-            'originChannelId' => originChannelId,
-            'originMessageTs' => originMessageTs
-        };
+        String combinedValue = opportunityId + '|' + workitemId;
 
         Map<String, Object> approveBtn = new Map<String, Object>{
             'type' => 'button',
             'text' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Approve' },
             'style' => 'primary',
             'action_id' => 'approve_record',
-            'value' => JSON.serialize(actionValue)
+            'value' => combinedValue
         };
         Map<String, Object> rejectBtn = new Map<String, Object>{
             'type' => 'button',
             'text' => new Map<String, Object>{ 'type' => 'plain_text', 'text' => 'Reject' },
             'style' => 'danger',
             'action_id' => 'reject_record',
-            'value' => JSON.serialize(actionValue)
+            'value' => combinedValue
         };
         Map<String, Object> viewBtn = new Map<String, Object>{
             'type' => 'button',
@@ -286,5 +292,10 @@ public without sharing class SlackApiService {
             }
         };
         callSlack('chat.postMessage', body);
+    }
+
+    // Backward-compatible overload used by older async callers.
+    public static void postDM(String slackUserId, String text, String opportunityId) {
+        postDM(slackUserId, text, opportunityId, null, null, null, null);
     }
 }
