@@ -17,6 +17,15 @@ public without sharing class SlackApiService {
     }
 
     public static void postSubmitButton(String channelId, String opportunityId) {
+        Opportunity opp = [
+            SELECT Name, Amount, CloseDate, Probability, StageName, SDO_Sales_Discount__c, ForecastCategoryName,
+                   AccountId, Account.Name, Account.Phone, Account.Industry, Account.Website,
+                   Account.BillingCity, Account.BillingState, Account.Owner.Name
+            FROM Opportunity
+            WHERE Id = :opportunityId
+            LIMIT 1
+        ];
+
         Map<String, Object> block = new Map<String, Object>{
             'type' => 'section',
             'text' => new Map<String, Object>{ 'type' => 'mrkdwn', 'text' => '*Opportunity Approval*\nClick below to submit this opportunity for approval.' }
@@ -44,6 +53,8 @@ public without sharing class SlackApiService {
         if (ts != null) {
             pinMessage(channelId, ts);
         }
+
+        upsertAccountCanvas(channelId, opp);
     }
 
     private static void pinMessage(String channelId, String ts) {
@@ -52,6 +63,182 @@ public without sharing class SlackApiService {
             'timestamp' => ts
         };
         callSlack('pins.add', body);
+    }
+
+    private static void upsertAccountCanvas(String channelId, Opportunity opp) {
+        if (opp == null || opp.AccountId == null) {
+            return;
+        }
+
+        String canvasMarkdown = buildAccountCanvasMarkdown(opp);
+        String canvasId = getChannelCanvasId(channelId);
+
+        if (String.isBlank(canvasId)) {
+            Map<String, Object> createBody = new Map<String, Object>{
+                'channel_id' => channelId,
+                'document_content' => new Map<String, Object>{
+                    'type' => 'markdown',
+                    'markdown' => canvasMarkdown
+                },
+                'title' => 'Account'
+            };
+            HttpResponse createRes = callSlack('conversations.canvases.create', createBody);
+            Map<String, Object> createResult = (Map<String, Object>) JSON.deserializeUntyped(createRes.getBody());
+            if (Boolean.valueOf(String.valueOf(createResult.get('ok')))) {
+                String createdCanvasId = (String) createResult.get('canvas_id');
+                if (!String.isBlank(createdCanvasId)) {
+                    saveChannelCanvasId(channelId, createdCanvasId);
+                }
+            } else if (String.valueOf(createResult.get('error')) == 'channel_canvas_already_exists') {
+                canvasId = getChannelCanvasIdFromSlack(channelId);
+                if (!String.isBlank(canvasId)) {
+                    saveChannelCanvasId(channelId, canvasId);
+                }
+            } else {
+                System.debug('upsertAccountCanvas: create failed: ' + createRes.getBody());
+            }
+            return;
+        }
+
+        Map<String, Object> editBody = new Map<String, Object>{
+            'canvas_id' => canvasId,
+            'changes' => new List<Object>{
+                new Map<String, Object>{
+                    'operation' => 'replace',
+                    'document_content' => new Map<String, Object>{
+                        'type' => 'markdown',
+                        'markdown' => canvasMarkdown
+                    }
+                }
+            }
+        };
+        HttpResponse editRes = callSlack('canvases.edit', editBody);
+        Map<String, Object> editResult = (Map<String, Object>) JSON.deserializeUntyped(editRes.getBody());
+        if (!Boolean.valueOf(String.valueOf(editResult.get('ok')))) {
+            System.debug('upsertAccountCanvas: edit failed: ' + editRes.getBody());
+        }
+    }
+
+    private static String buildAccountCanvasMarkdown(Opportunity opp) {
+        Account acc = opp.Account;
+        String accountUrl = URL.getOrgDomainUrl().toExternalForm() + '/lightning/r/Account/' + opp.AccountId + '/view';
+        String oppUrl = URL.getOrgDomainUrl().toExternalForm() + '/lightning/r/Opportunity/' + opp.Id + '/view';
+        List<Opportunity> relatedOpps = [
+            SELECT Id, Name, Amount, StageName, CloseDate
+            FROM Opportunity
+            WHERE AccountId = :opp.AccountId
+            ORDER BY CloseDate DESC NULLS LAST, LastModifiedDate DESC
+            LIMIT 10
+        ];
+
+        String amountStr = opp.Amount != null ? opp.Amount.setScale(2).format() : 'N/A';
+        String closeDateStr = opp.CloseDate != null ? String.valueOf(opp.CloseDate) : 'N/A';
+        String probStr = opp.Probability != null ? String.valueOf(opp.Probability.intValue()) + '%' : 'N/A';
+
+        String accountName = acc != null && acc.Name != null ? acc.Name : 'N/A';
+        String accountPhone = acc != null && acc.Phone != null ? acc.Phone : 'N/A';
+        String accountIndustry = acc != null && acc.Industry != null ? acc.Industry : 'N/A';
+        String accountWebsite = acc != null && acc.Website != null ? acc.Website : 'N/A';
+        String accountCity = acc != null && acc.BillingCity != null ? acc.BillingCity : 'N/A';
+        String accountState = acc != null && acc.BillingState != null ? acc.BillingState : 'N/A';
+        String ownerName = acc != null && acc.Owner != null && acc.Owner.Name != null ? acc.Owner.Name : 'N/A';
+
+        return '# Account Overview\n' +
+            '|Field|Value|\n' +
+            '|---|---|\n' +
+            '|Account|[' + accountName + '](' + accountUrl + ')|\n' +
+            '|Owner|' + ownerName + '|\n' +
+            '|Industry|' + accountIndustry + '|\n' +
+            '|Phone|' + accountPhone + '|\n' +
+            '|Website|' + accountWebsite + '|\n' +
+            '|Billing City|' + accountCity + '|\n' +
+            '|Billing State|' + accountState + '|\n\n' +
+            '## Related Opportunities\n' +
+            (relatedOpps.isEmpty()
+                ? '_No related opportunities found._\n'
+                : buildRelatedOpportunityList(relatedOpps, opp.Id, oppUrl));
+    }
+
+    private static String buildRelatedOpportunityList(List<Opportunity> relatedOpps, Id currentOpportunityId,
+                                                      String currentOppUrl) {
+        String output = '|Opportunity|Amount|Stage|Close Date|\n|---|---|---|---|\n';
+        for (Opportunity relatedOpp : relatedOpps) {
+            String oppLink = '[' + relatedOpp.Name + '](' +
+                URL.getOrgDomainUrl().toExternalForm() + '/lightning/r/Opportunity/' + relatedOpp.Id + '/view)';
+            String amountStr = relatedOpp.Amount != null ? relatedOpp.Amount.setScale(2).format() : 'N/A';
+            String stageStr = relatedOpp.StageName != null ? String.valueOf(relatedOpp.StageName) : 'N/A';
+            String closeDateStr = relatedOpp.CloseDate != null ? String.valueOf(relatedOpp.CloseDate) : 'N/A';
+            if (relatedOpp.Id == currentOpportunityId) {
+                oppLink = '[' + relatedOpp.Name + '](' + currentOppUrl + ') (current)';
+            }
+            output += '|'
+                + oppLink + '|'
+                + amountStr + '|'
+                + stageStr + '|'
+                + closeDateStr + '|\n';
+        }
+        return output;
+    }
+
+    private static String getChannelCanvasId(String channelId) {
+        List<Slack_Channel_Canvas__c> mappings = [
+            SELECT Channel_Id__c, Canvas_Id__c
+            FROM Slack_Channel_Canvas__c
+            WHERE Channel_Id__c = :channelId
+            LIMIT 1
+        ];
+        if (!mappings.isEmpty() && !String.isBlank(mappings[0].Canvas_Id__c)) {
+            return mappings[0].Canvas_Id__c;
+        }
+
+        String canvasId = getChannelCanvasIdFromSlack(channelId);
+        if (!String.isBlank(canvasId)) {
+            saveChannelCanvasId(channelId, canvasId);
+        }
+        return canvasId;
+    }
+
+    private static String getChannelCanvasIdFromSlack(String channelId) {
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint('https://slack.com/api/conversations.info?channel=' + EncodingUtil.urlEncode(channelId, 'UTF-8'));
+        req.setMethod('GET');
+        req.setHeader('Authorization', 'Bearer ' + getBotToken());
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        Map<String, Object> result = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+        if (!(Boolean) result.get('ok')) {
+            return null;
+        }
+
+        Map<String, Object> channel = (Map<String, Object>) result.get('channel');
+        if (channel == null) {
+            return null;
+        }
+        Map<String, Object> properties = (Map<String, Object>) channel.get('properties');
+        if (properties == null) {
+            return null;
+        }
+        Map<String, Object> canvas = (Map<String, Object>) properties.get('canvas');
+        if (canvas == null) {
+            return null;
+        }
+
+        String canvasId = canvas.containsKey('id') ? (String) canvas.get('id') : null;
+        if (String.isBlank(canvasId) && canvas.containsKey('file_id')) {
+            canvasId = (String) canvas.get('file_id');
+        }
+        return canvasId;
+    }
+
+    private static void saveChannelCanvasId(String channelId, String canvasId) {
+        if (String.isBlank(channelId) || String.isBlank(canvasId)) {
+            return;
+        }
+
+        upsert new Slack_Channel_Canvas__c(
+            Channel_Id__c = channelId,
+            Canvas_Id__c = canvasId
+        ) Channel_Id__c;
     }
 
     public static void openApproverSelectModal(String triggerId, String opportunityId) {
