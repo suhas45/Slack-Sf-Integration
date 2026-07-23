@@ -142,8 +142,14 @@ public without sharing class SlackApiService {
         String accountCity = acc != null && acc.BillingCity != null ? acc.BillingCity : 'N/A';
         String accountState = acc != null && acc.BillingState != null ? acc.BillingState : 'N/A';
         String ownerName = acc != null && acc.Owner != null && acc.Owner.Name != null ? acc.Owner.Name : 'N/A';
+        String summaryText =
+            accountName + ' has ' + String.valueOf(relatedOpps.size()) + ' related opportunities. ' +
+            'The current opportunity is ' + opp.Name + ', amount ' + amountStr + ', ' +
+            'stage ' + String.valueOf(opp.StageName) + ', closing on ' + closeDateStr + '.';
 
-        return '# Account Overview\n' +
+        return '# Summary\n' +
+            summaryText + '\n\n' +
+            '## Account Details\n' +
             '|Field|Value|\n' +
             '|---|---|\n' +
             '|Account|[' + accountName + '](' + accountUrl + ')|\n' +
